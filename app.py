@@ -235,8 +235,38 @@ with c1:
     st.plotly_chart(fig_life, use_container_width=True)
 
 with c2:
-    fig_nw = px.histogram(out["net_worth"], nbins=40, title="Net Worth at Death ($MM)")
+    # --- Wealth vs life: scatter or density ---
+    life_for_net = out.get("projected_life_frac", out["projected_life"])  # use fractional crossing if present
+    nw = out["net_worth"]
+
+    # Count tech purchases per draw (any positive years_added means a purchase that year)
+    purchases = (out["tech_years_by_age"] > 0).sum(axis=1)
+    # Bucket for clean legend
+    bucket = np.where(purchases == 0, "0",
+              np.where(purchases == 1, "1",
+              np.where(purchases <= 3, "2-3", "4+")))
+    df_nw = pd.DataFrame({"Life": life_for_net, "NetWorth": nw, "Purchases": bucket})
+
+    view = st.radio("Wealth view", ["Scatter", "Heatmap"], index=0, horizontal=True)
+    if view == "Scatter":
+        fig_nw = px.scatter(
+            df_nw, x="Life", y="NetWorth", color="Purchases",
+            title="Net Worth vs Projected Life (per draw)",
+            labels={"Life": "Projected life (years)", "NetWorth": "Net worth at death ($MM)"},
+            opacity=0.55
+        )
+    else:
+        fig_nw = px.density_heatmap(
+            df_nw, x="Life", y="NetWorth",
+            nbinsx=40, nbinsy=40, color_continuous_scale="Blues",
+            title="Net Worth vs Projected Life — density",
+            labels={"Life": "Projected life (years)", "NetWorth": "Net worth at death ($MM)"}
+        )
+
+    # Start x-axis at the user's current age for clarity
+    fig_nw.update_xaxes(range=[int(age), None])
     st.plotly_chart(fig_nw, use_container_width=True)
+
 # Years‑added chart: Excel‑match mode by default with options
     mode = st.selectbox(
         "Years-added chart",
