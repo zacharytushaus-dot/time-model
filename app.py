@@ -30,18 +30,20 @@ preset = st.sidebar.selectbox(
 BASE_RISK_MULT = {
     "Consistent Sleep": 0.88,
     "Frequent Exercise": 0.68,
+    "Frequent Sauna": 0.90, # ≥3–4 sessions/week; consider 0.75–0.80 for 4–7/wk
     "Mediterranean Diet": 0.77,
     "Meditation": 0.93,
     "Red-Light Therapy": 0.98,
     "Smoking Currently": 2.5, # harmful, editable in UI later if we want
+    "Heavy Drinking": 1.25, # 3-4 drinks/day; use 1.35 for "very heavy"
 }
 
 # Preset → default toggle set
 PRESET_TOGGLES = {
-    "None":               {"Consistent Sleep": False, "Frequent Exercise": False, "Mediterranean Diet": False, "Meditation": False, "Red-Light Therapy": False, "Smoking Currently": False},
-    "Athlete":            {"Consistent Sleep": True,  "Frequent Exercise": True,  "Mediterranean Diet": True,  "Meditation": True,  "Red-Light Therapy": False, "Smoking Currently": False},
-    "Budget Health":      {"Consistent Sleep": True,  "Frequent Exercise": True,  "Mediterranean Diet": False, "Meditation": True,  "Red-Light Therapy": False, "Smoking Currently": False},
-    "Max Longevity":      {"Consistent Sleep": True,  "Frequent Exercise": True,  "Mediterranean Diet": True,  "Meditation": True,  "Red-Light Therapy": True, "Smoking Currently": False},
+    "None":               {"Consistent Sleep": False, "Frequent Exercise": False, "Mediterranean Diet": False, "Meditation": False, "Red-Light Therapy": False, "Frequent Sauna": False, "Smoking Currently": False, "Heavy Drinking": False},
+    "Athlete":            {"Consistent Sleep": True,  "Frequent Exercise": True,  "Mediterranean Diet": True,  "Meditation": True,  "Red-Light Therapy": False, "Frequent Sauna": False, "Smoking Currently": False, "Heavy Drinking": False},
+    "Budget Health":      {"Consistent Sleep": True,  "Frequent Exercise": True,  "Mediterranean Diet": False, "Meditation": True,  "Red-Light Therapy": False, "Frequent Sauna": False, "Smoking Currently": False, "Heavy Drinking": False},
+    "Max Longevity":      {"Consistent Sleep": True,  "Frequent Exercise": True,  "Mediterranean Diet": True,  "Meditation": True,  "Red-Light Therapy": True, "Frequent Sauna": True, "Smoking Currently": False, "Heavy Drinking": False},
 }
 
 st.sidebar.header("2) Your Health Habits")
@@ -56,12 +58,14 @@ st.sidebar.caption("How likely you are to commit to your habits, from 0 to 100%"
 
 # Canonical keys so UI labels, costs, and HR multipliers stay in sync
 CANON = {
-    "Consistent Sleep":    "sleep",
-    "Frequent Exercise":       "exercise",
-    "Mediterranean Diet": "mediterraneandiet",
+    "Consistent Sleep":         "sleep",
+    "Frequent Exercise":        "exercise",
+    "Frequent Sauna":           "sauna",
+    "Mediterranean Diet":       "mediterraneandiet",
     "Meditation":               "meditation",
     "Red-Light Therapy":        "redlight",
     "Smoking Currently":        "smoker",
+    "Heavy Drinking":           "heavyalcohol",
 }
 
 intervention_on = {}
@@ -82,17 +86,19 @@ with st.sidebar.expander("Health Habit Costs", expanded=False):
     st.caption("One field per habit: dollars per year (negative allowed if it saves you money). We apply healthcare inflation automatically each year.")
 
     # canonical keys used everywhere (from CANON above)
-    ORDER = ["sleep", "exercise", "redlight", "mediterraneandiet", "meditation", "smoker"]
+    ORDER = ["sleep", "exercise", "sauna", "mediterraneandiet", "meditation", "redlight", "smoker", "heavyalcohol"]
     LABEL_FOR = {v: k for k, v in CANON.items()}  # reverse map: key -> UI label
 
     # Defaults: previous one-time + recurring, converted to annual (keeps totals comparable)
     ANNUAL_DEFAULT = {
-        "sleep":              50,   # ≈ $50/yr
+        "sleep":              50.0,         # ≈ $50/yr
         "exercise":           240.0,      # gym, etc.
-        "redlight":           150,  # ≈ $157/yr
+        "sauna":              300.0,      # electricity/entry
         "mediterraneandiet":  5400.0,     # extra groceries vs baseline
         "meditation":         70.0,       # app subscription
+        "redlight":           150.0,        # ≈ $157/yr
         "smoker":             800.0,      # cigarettes; make negative if quitting = savings
+        "heavyalcohol":       1000.0,     # user-editable
     }
 
     annual_inputs = {}
@@ -217,21 +223,18 @@ with c1:
                          help="Monte-Carlo: lifespans sampled from yearly death probabilities. Threshold: lifespans when biological age exceeds society's average life-expectancy")
     if hist_mode.startswith("Monte"):
         life_data = out["projected_life_mc"]
-        life_title = "Monte‑Carlo Projected Life (1‑year bins)"
+        life_title = "Monte-Carlo Projected Life (1-year bins)"
         # keep 1‑year bins for the hazard MC
         nbins = int(np.ptp(life_data)) + 1 if np.ptp(life_data) >= 1 else 10
         fig_life = px.histogram(life_data, nbins=nbins, title=life_title)
     else:
-        # Prefer fractional crossing if present; fall back to integer
+        # prefer fractional crossing if present
         life_data = out.get("projected_life_frac", out["projected_life"])
         life_title = "Projected Lifespans Across Simulations"
         fig_life = px.histogram(life_data, title=life_title)
-        # finer bars look better with fractional values
-        fig_life.update_traces(xbins=dict(size=1))
-
-    # start x‑axis at the user’s age for both modes
-    min_x = int(age)
-    fig_life.update_xaxes(range=[min_x, None])
+        fig_life.update_traces(xbins=dict(size=0.5))  # half‑year bins
+    # start x‑axis at current age (optional but tidy)
+    fig_life.update_xaxes(range=[int(age), None])
     st.plotly_chart(fig_life, use_container_width=True)
 
 with c2:
@@ -270,7 +273,7 @@ with c2:
 # Years‑added chart: Excel‑match mode by default with options
     mode = st.selectbox(
         "Years-added chart",
-        ["Your Health Habits", "Interventions + tech (alive-weighted)", "Tech only (alive-weighted)"],
+        ["Your Health Habits", "Habits & Treatments (if alive)", "Future Treatments (if alive)"],
         index=0,
         help="Excel's dashboard chart shows interventions only. 'Alive-weighted' tech counts only when a draw is alive that year"
     )
@@ -289,7 +292,7 @@ with c2:
 
     if mode.startswith("Your Health Habits"):
         y = yrs_int
-    elif mode.startswith("Interventions + tech"):
+    elif mode.startswith("Habits & Treatments (if alive)"):
         y = yrs_int + exp_tech_by_age
     else:  # Tech only
         y = exp_tech_by_age
@@ -300,7 +303,7 @@ with c2:
     st.plotly_chart(fig_yrs, use_container_width=True)
 
     # Optional diagnostic
-    with st.expander("Diagnostics: biological age vs LE threshold (mean across draws)"):
+    with st.expander("Biological Age vs Life Expectancy (avg across simulations)"):
         mean_bio = out["bio_age"].mean(axis=0)        # (T,)
         le_series = out.get("threshold_series")       # (T,)
         if le_series is None:
@@ -321,8 +324,8 @@ with c2:
     with st.expander("Personal Finance Details, First 20 Years"):
         df_fin = pd.DataFrame({
             "Age": out["chrono_age"],
-            "Discretionary income": out["discretionary_income_by_year"],
-            "Total health spend": out["health_spend_by_year"],
-            "Contribution (DI − spend)": out["contrib_by_year"],
+            "Discretionary Income": out["discretionary_income_by_year"],
+            "Total Healthcare Spending": out["health_spend_by_year"],
+            "Excess Cash for Investments": out["contrib_by_year"],
         })
         st.dataframe(df_fin.head(20))

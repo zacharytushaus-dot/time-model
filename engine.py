@@ -308,30 +308,30 @@ def run_monte_carlo(inp: Inputs) -> Dict[str, Any]:
     death_idx_cross = np.where(died, cross.argmax(axis=1), T - 1)
     projected_life_threshold = inp.start_age + death_idx_cross
 
-        # ----- Fractional crossing (linear interpolation inside the year) -----
-    # crossing occurs between the last non-crossed year (t_prev) and the first crossed year (t)
-    t = death_idx_cross                               # (D,)
-    t_prev = np.maximum(t - 1, 0)                     # (D,)
+    # ---- Fractional crossing (linear interpolation inside the year) ----
+    # t = first crossed year; t_prev = last not‑yet‑crossed year
+    t = death_idx_cross
+    t_prev = np.maximum(t - 1, 0)
 
-    # distance to threshold before and at the crossing year
-    delta_prev = threshold_series[t_prev] - bio_age[np.arange(draws), t_prev]  # (D,)
-    delta_curr = threshold_series[t]      - bio_age[np.arange(draws), t]       # (D,)
+    # distance to threshold just before crossing and at crossing
+    delta_prev = threshold_series[t_prev] - bio_age[np.arange(draws), t_prev]
+    delta_curr = threshold_series[t]      - bio_age[np.arange(draws), t]
 
-    # fraction of the year from t_prev to t where crossing happens
-    # (only for draws that actually crossed; others keep the integer year)
+    # fraction of the year between t_prev and t where crossing occurs
+    eps = 1e-12
     frac = np.zeros_like(delta_prev, dtype=float)
     mask = (t > 0) & died
-    # avoid divide-by-zero with a tiny epsilon
-    frac[mask] = np.clip(delta_prev[mask] / (delta_prev[mask] - delta_curr[mask] + 1e-12), 0.0, 1.0)
+    frac[mask] = np.clip(delta_prev[mask] / (delta_prev[mask] - delta_curr[mask] + eps), 0.0, 1.0)
 
-    # fractional projected life: start_age + t_prev + frac  (else fallback to integer)
+    # fractional projected life (fallback to integer if no crossing)
     projected_life_threshold_frac = np.where(
-        died, inp.start_age + t_prev + frac, inp.start_age + t
+    died, inp.start_age + t_prev + frac, inp.start_age + t
     ).astype(float)
 
     # Net worth at death (threshold crossing)
     idx_clamped = np.clip(death_idx_cross, 0, T - 1)
     net_at_death = balance_path[np.arange(draws), idx_clamped]
+
 
     # --------- Optional MC hazard sampling (distribution) ---------
     q_eff = _q_piecewise(bio_age, fAge, q_tab, inp.lambdaP)
