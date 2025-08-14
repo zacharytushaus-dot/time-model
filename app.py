@@ -54,6 +54,25 @@ for name, default_on in PRESET_TOGGLES[preset].items():
 adherence = st.sidebar.slider("Adherence to Your Habits (%)", 0.0, 1.0, 1.0, 0.05)
 st.sidebar.caption("How likely you are to commit to your habits, from 0 to 100%")
 
+# --- Weight status (mutually exclusive) ---
+st.sidebar.subheader("Weight status")
+weight_label = st.sidebar.selectbox(
+    "Pick one",
+    ["None / Healthy Range",
+     "Overweight (BMI 27.5-29.9)",
+     "High Body Weight (BMI 30-34.9)",
+     "Very High Body Weight (BMI ≥35)"],
+    index=0,
+    help="If BMI misfits you (very muscular), use waist guidance: central obesity ≈ waist-to-height ≥0.60 or large waist (≥102 cm men, ≥88 cm women)."
+)
+
+WEIGHT_HR = {
+    "None / Healthy Range":            1.00,
+    "Overweight (BMI 27.5-29.9)":      1.20,  # Lancet IPD meta-analysis
+    "High Body Weight (BMI 30-34.9)":  1.45,
+    "Very High Body Weight (BMI ≥35)": 1.94,
+}
+
 # Final multipliers to feed engine (Excel rule)
 
 # Canonical keys so UI labels, costs, and HR multipliers stay in sync
@@ -66,6 +85,7 @@ CANON = {
     "Red-Light Therapy":        "redlight",
     "Smoking Currently":        "smoker",
     "Heavy Drinking":           "heavyalcohol",
+    "Weight status":            "weight",
 }
 
 intervention_on = {}
@@ -74,19 +94,32 @@ for name, base in BASE_RISK_MULT.items():
     key = CANON[name]
     on = bool(toggles[name])
     intervention_on[key] = on
-    # benefit-weighting (80% adherence = 80% of the benefit)
-    if on and base != 1.0:
+
+    if not on or base == 1.0:
+        m = 1.0
+    elif base < 1.0:
+        # Protective habit → scale by adherence (80% adherence = 80% of the benefit)
         m = 1.0 - adherence * (1.0 - base)
     else:
-        m = 1.0
+        # Harmful exposure → do NOT scale by adherence
+        m = float(base)
+
     lifestyle_HRs[key] = float(m)
+
+# Add Weight status as its own factor (scaled by the same adherence rule)
+w_on = (weight_label != "None / Healthy Range")
+base_w = WEIGHT_HR[weight_label]
+w_mult = base_w if w_on else 1.0  # weight is a state/exposure → no adherence scaling
+
+lifestyle_HRs["weight"] = float(w_mult)
+intervention_on["weight"] = bool(w_on)
 
 # ------------------ Sidebar: habit costs (annual only) ------------------
 with st.sidebar.expander("Health Habit Costs", expanded=False):
     st.caption("One field per habit: dollars per year (negative allowed if it saves you money). We apply healthcare inflation automatically each year.")
 
     # canonical keys used everywhere (from CANON above)
-    ORDER = ["sleep", "exercise", "sauna", "mediterraneandiet", "meditation", "redlight", "smoker", "heavyalcohol"]
+    ORDER = ["sleep", "exercise", "sauna", "mediterraneandiet", "meditation", "redlight", "smoker", "heavyalcohol", "weight"]
     LABEL_FOR = {v: k for k, v in CANON.items()}  # reverse map: key -> UI label
 
     # Defaults: previous one-time + recurring, converted to annual (keeps totals comparable)
@@ -99,12 +132,17 @@ with st.sidebar.expander("Health Habit Costs", expanded=False):
         "redlight":           150.0,        # ≈ $157/yr
         "smoker":             800.0,      # cigarettes; make negative if quitting = savings
         "heavyalcohol":       1000.0,     # user-editable
+        "weight":             0.0,         # no expense by default
     }
 
     annual_inputs = {}
     for key in ORDER:
         label = LABEL_FOR[key]
-        enabled = toggles[label]
+        if key == "weight":
+            enabled = (weight_label != "None / Healthy Range")
+        else:
+            enabled = toggles[label]
+
         annual_inputs[key] = st.number_input(
             f"{label} — $ per year",
             value=float(ANNUAL_DEFAULT[key]),
@@ -203,36 +241,78 @@ else:
     median_net = float(np.median(out["net_worth"]))
 
     with col1:
-        st.metric("Projected Life (median)", f"{median_life:.0f} years",
-                  help="The age when your biological age first equals or exceeds society's average life-expectancy for that calendar year")
-        # As a placeholder, personal gain ≈ median life − current age
-        st.metric("Personal gain (median)", f"{median_life - age:.2f} years")
+        st.metric(
+            "Projected Life (median)",
+            f"{median_life:.0f} years",
+            help="The age when your biological age first equals or exceeds society's average life-expectancy for that calendar year"
+        )
+        # Replace old 'Personal gain' with cleaner 'Years remaining'
+        years_remaining = int(round(median_life - age))
+        st.metric("Years remaining (median)", f"{years_remaining:d} years")
 
-    with col2:
-        st.metric("Net Worth (median, $MM)", f"{median_net:,.2f}")
-        st.metric("Simulations Ran", f"{draws:,}")
+# --- Derived “expected years” metrics ---
+yrs_from_habits = float(np.sum(out["yrs_added_interventions"]))  # integrates the survival delta series
 
-    with col3:
-        st.metric("90% range (5th–95th percentile)", f"{p5:.0f}–{p95:.0f} years",
-                  help="Middle 90% of simulated lifespans; 5% of draws fall below the left value and 5% above the right")
+# Alive‑weighted expected years from future treatments (same calc you use later for the area chart)
+le_series = out.get("threshold_series")
+if le_series is None:
+    le_series = out.get("le_threshold_series")
+alive_mask = (out["bio_age"] < le_series[None, :]).astype(float)  # (D, T)
+exp_tech_by_age = (out["tech_years_by_age"] * alive_mask).mean(axis=0)
+yrs_from_tech = float(np.sum(exp_tech_by_age))
+
+with col2:
+    st.metric("Net Worth (median, $MM)", f"{median_net:,.2f}")
+    st.metric(
+        "Years from your habits (expected)",
+        f"{yrs_from_habits:.1f} years",
+        help="Expected years added from your current health habits, integrated over your lifetime."
+    )
+
+with col3:
+    st.metric(
+        "90% range (5th-95th percentile)",
+        f"{p5:.0f}-{p95:.0f} years",
+        help="Middle 90% of simulated lifespans; 5% of draws fall below the left value and 5% above the right"
+    )
+    st.metric(
+        "Years from treatments (expected, if bought)",
+        f"{yrs_from_tech:.1f} years",
+        help="Alive-weighted expected years from Tier 1-3 purchases, gated by your budget and arrival probabilities."
+    )
+
     
 # Histograms
 c1, c2 = st.columns(2)
 with c1:
-    hist_mode = st.radio("Life histogram", ["Monte-Carlo (hazard)", "Threshold crossing"], index=0,
-                         help="Monte-Carlo: lifespans sampled from yearly death probabilities. Threshold: lifespans when biological age exceeds society's average life-expectancy")
-    if hist_mode.startswith("Monte"):
+    # Plain-English toggle + clearer help text
+    hist_mode = st.radio(
+        "How should we simulate lifespans?",
+        ["Random chance each year", "Health threshold (no dice)"],
+        index=1,  # default to the deterministic view
+        help=("Random chance each year: we roll the dice on survival each simulated year based on your risk profile. "
+            "Health threshold (no dice): we assume death the moment your projected health age meets the average "
+            "life expectancy for that calendar year (no randomness).")
+    )
+
+    if hist_mode == "Random chance each year":
         life_data = out["projected_life_mc"]
-        life_title = "Monte-Carlo Projected Life (1-year bins)"
-        # keep 1‑year bins for the hazard MC
+        life_title = "Simulated ages at death — random chance each year"
         nbins = int(np.ptp(life_data)) + 1 if np.ptp(life_data) >= 1 else 10
-        fig_life = px.histogram(life_data, nbins=nbins, title=life_title)
+        fig_life = px.histogram(
+            life_data, nbins=nbins, title=life_title,
+            labels={"value": "Age at death (years)", "count": "Simulations"}
+        )
     else:
-        # prefer fractional crossing if present
+        # Prefer fractional crossing if present for smoother bins
         life_data = out.get("projected_life_frac", out["projected_life"])
-        life_title = "Projected Lifespans Across Simulations"
-        fig_life = px.histogram(life_data, title=life_title)
-        fig_life.update_traces(xbins=dict(size=0.5))  # half‑year bins
+        life_title = "Projected age at health threshold (no randomness)"
+        fig_life = px.histogram(
+            life_data, title=life_title,
+            labels={"value": "Age at death (years)", "count": "Simulations"}
+        )
+        fig_life.update_traces(xbins=dict(size=0.5))
+
     # start x‑axis at current age (optional but tidy)
     fig_life.update_xaxes(range=[int(age), None])
     st.plotly_chart(fig_life, use_container_width=True)
