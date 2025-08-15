@@ -3,6 +3,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 
 from engine import Inputs, Tier, run_monte_carlo, IntervCost
 
@@ -409,3 +410,141 @@ with c2:
             "Excess Cash for Investments": out["contrib_by_year"],
         })
         st.dataframe(df_fin.head(20))
+
+# ------------------ Investments over time ------------------
+st.subheader("Investments over time")
+
+# --- Controls row ---
+cA, cB, cC, cD = st.columns([2, 1, 1, 1])
+with cA:
+    compare = st.radio(
+        "Include future treatments",
+        ["Both (overlay)", "With treatments", "Without treatments"],
+        index=0, horizontal=True,
+        help="With = includes costs when they arrive and extra years gained. "
+             "Without = identical inputs but no future treatments."
+    )
+with cB:
+    avg = st.radio("Average", ["Mean", "Median"], index=0, horizontal=True)
+with cC:
+    band_opt = st.selectbox("Uncertainty band", ["None", "50%", "80%", "90%"], index=3)
+with cD:
+    alive_weighted = st.checkbox(
+        "Alive-weighted", value=True,
+        help="Average only across simulations still alive at each age."
+    )
+
+# --- Data from engine ---
+age_grid = out["chrono_age"]                           # (T,)
+path_with = out["balance_path"] / 1e6                  # portfolio chart in $MM
+path_without = out.get("balance_no_tech_path", None)
+path_without = (path_without / 1e6) if path_without is not None else None
+
+# Safe fetch of the threshold series
+thr = out.get("threshold_series")
+if thr is None:
+    thr = out.get("le_threshold_series")               # (T,)
+
+# Alive masks for with/without tech
+alive_with = (out["bio_age"] < thr[None, :])           # (D, T)
+cum_tech = np.cumsum(out["tech_years_by_age"], axis=1) # (D, T)
+bio_no_tech = out["bio_age"] + cum_tech                # remove tech benefit → older bio age
+alive_without = (bio_no_tech < thr[None, :])           # (D, T)
+
+def summarize(path, alive_mask, use_mean: bool, band: str):
+    """Return center line and optional percentile bands per age."""
+    D, T = path.shape
+    center = np.full(T, np.nan)
+    lo = np.full(T, np.nan)
+    hi = np.full(T, np.nan)
+    for t in range(T):
+        vals = path[alive_mask[:, t], t] if alive_weighted else path[:, t]
+        if vals.size == 0:
+            continue
+        center[t] = (np.mean(vals) if use_mean else np.median(vals))
+        if band != "None":
+            if band == "50%": p = (25, 75)
+            elif band == "80%": p = (10, 90)
+            else: p = (5, 95)
+            lo[t], hi[t] = np.percentile(vals, p)
+    return center, lo, hi
+
+m_with, lo_with, hi_with = summarize(path_with, alive_with, (avg == "Mean"), band_opt)
+if path_without is None:
+    m_without = lo_without = hi_without = None
+else:
+    m_without, lo_without, hi_without = summarize(path_without, alive_without, (avg == "Mean"), band_opt)
+
+# --- Axis end: stop at the last age where anyone is alive in the plotted selection
+def last_age_any(mask: np.ndarray) -> float:
+    idx = np.where(mask.any(axis=0))[0]
+    return float(age_grid[idx[-1]]) if idx.size else float(age_grid[-1])
+
+end_with = last_age_any(alive_with)
+end_without = last_age_any(alive_without)
+x_end = (
+    end_with if compare == "With treatments"
+    else end_without if compare == "Without treatments"
+    else max(end_with, end_without)
+)
+x_start = float(age_grid[0])
+
+# --- Chart A: portfolio value by age ---
+fig_bal = go.Figure()
+if compare in ("Both (overlay)", "With treatments"):
+    fig_bal.add_trace(go.Scatter(x=age_grid, y=m_with, mode="lines", name="With treatments"))
+if compare in ("Both (overlay)", "Without treatments") and m_without is not None:
+    fig_bal.add_trace(go.Scatter(x=age_grid, y=m_without, mode="lines", name="Without treatments"))
+
+# Show band only when not overlay (keeps it readable)
+if band_opt != "None" and compare != "Both (overlay)":
+    lo, hi = (lo_with, hi_with) if compare == "With treatments" else (lo_without, hi_without)
+    if lo is not None and hi is not None:
+        fig_bal.add_trace(go.Scatter(
+            x=np.concatenate([age_grid, age_grid[::-1]]),
+            y=np.concatenate([hi, lo[::-1]]),
+            fill="toself", line=dict(width=0), name=f"{band_opt} band",
+            hoverinfo="skip", opacity=0.18
+        ))
+
+fig_bal.update_layout(
+    title="Portfolio value by age",
+    xaxis_title="Age (years)",
+    yaxis_title="Balance ($MM)"
+)
+# ⬅️ Trim the x-axis to the real endpoint
+fig_bal.update_xaxes(range=[x_start, x_end])
+
+st.plotly_chart(fig_bal, use_container_width=True)
+
+# --- Chart B: Annual cash flows (optional) ---
+show_cf = st.checkbox(
+    "Show annual cash flows", value=False,
+    help="Cash into the portfolio vs expected treatment spend (excludes market returns)."
+)
+if show_cf:
+    # Dollars (not millions) for cash flows
+    contrib = out["contrib_by_year"]                         # $/yr
+    tech_spend = out.get("tech_costs_by_age")               # $/yr per draw
+    tech_spend_mean = np.zeros_like(contrib) if tech_spend is None else tech_spend.mean(axis=0)
+
+    df_cf = pd.DataFrame({
+        "Age": age_grid,
+        "Contributions (DI − health)": contrib,
+        "Expected treatment spend": -tech_spend_mean,        # negative = outflow
+    })
+    # Trim rows beyond the endpoint
+    df_cf = df_cf[df_cf["Age"] <= x_end]
+
+    fig_cf = px.bar(
+        df_cf, x="Age",
+        y=["Contributions (DI − health)", "Expected treatment spend"],
+        barmode="relative",
+        title="Cash flows into portfolio (excluding market returns)",
+        labels={"value": "$ per year"}
+    )
+    # Format $ nicely and trim x-axis
+    fig_cf.update_layout(yaxis_tickprefix="$", yaxis_tickformat=",.0f")
+    fig_cf.update_xaxes(range=[x_start, x_end])
+
+    st.plotly_chart(fig_cf, use_container_width=True)

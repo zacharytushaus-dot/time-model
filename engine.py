@@ -241,8 +241,11 @@ def run_monte_carlo(inp: Inputs) -> Dict[str, Any]:
     # Simulate tech tiers + balance path
     draws = int(inp.draws)
     balance = np.full(draws, float(inp.start_capital), dtype=float)
+    balance_no_tech = np.full(draws, float(inp.start_capital), dtype=float)   # parallel path with zero tech purchases
     balance_path = np.zeros((draws, T), dtype=float)
+    balance_no_tech_path = np.zeros((draws, T), dtype=float)
     tech_years_by_age = np.zeros((draws, T), dtype=float)
+    tech_costs_by_age = np.zeros((draws, T), dtype=float)                     # dollars spent on treatments each year
     miss_streak = np.zeros((draws, len(inp.tiers)), dtype=int)
     available = np.ones((draws, len(inp.tiers)), dtype=bool)
 
@@ -282,10 +285,16 @@ def run_monte_carlo(inp: Inputs) -> Dict[str, Any]:
 
         # Contributions from DI minus health spend (scalar per year)
         balance += contrib_by_year[t]
-        balance -= total_cost
+        balance -= total_cost                     # tech purchases reduce balance
         balance *= (1.0 + inp.investment_return)
         balance_path[:, t] = balance
         tech_years_by_age[:, t] = total_years
+        tech_costs_by_age[:, t] = total_cost      # store costs for expected-spend chart
+
+        # Parallel path with NO treatments (same DI/returns; never subtract cost)
+        balance_no_tech += contrib_by_year[t]
+        balance_no_tech *= (1.0 + inp.investment_return)
+        balance_no_tech_path[:, t] = balance_no_tech
 
     # Biological age
     cum_tech = np.cumsum(tech_years_by_age, axis=1)
@@ -354,6 +363,9 @@ def run_monte_carlo(inp: Inputs) -> Dict[str, Any]:
         "tech_years_by_age": tech_years_by_age,
         "bio_age": bio_age,
         "chrono_age": chrono_age,
+        "balance_path": balance_path,
+        "balance_no_tech_path": balance_no_tech_path,
+        "tech_costs_by_age": tech_costs_by_age,
         # Diagnostics
         "health_spend_by_year": health_by_year,
         "contrib_by_year": contrib_by_year,
